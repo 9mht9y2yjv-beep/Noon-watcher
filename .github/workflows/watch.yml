@@ -28,6 +28,7 @@ jobs:
           SINGLE_CYCLE: "true"
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}  # ميزتنا الجديدة للذكاء الاصطناعي 🧠
           X_VISITOR_ID: ${{ secrets.X_VISITOR_ID }}
           X_LAT: ${{ secrets.X_LAT }}
           X_LNG: ${{ secrets.X_LNG }}
