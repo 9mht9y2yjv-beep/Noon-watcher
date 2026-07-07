@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Noon Minutes Watcher — v6.0 (Pure Local Algorithmic Engine)
+Noon Minutes Watcher — v6.1 (Diagnostic & Algorithmic Engine)
 ------------------------------------------------------------------
-100% Independent & Free. No External AI calls, No Quota Limits.
-Combines Historical Baseline with Intra-cycle Peer Anomaly Detection.
+Independent & Free. No External AI calls.
+Includes full error logging to diagnose blank responses.
 """
 
 import os
@@ -41,7 +41,7 @@ HEADERS = {
     "x-lat": os.environ.get("X_LAT", "245868084"),
     "x-lng": os.environ.get("X_LNG", "465789328"),
     "x-border-enabled": "true",
-    "x-ecom-zonecode": os.environ.get("X_ECOM_ZONECODE", "SA-RUH-S17"),
+    "x-ecom-zonecode": os.environ.get("X_ECOM_ZONEcode", "SA-RUH-S17"),
     "x-mp-country": "sa",
     "x-nooninstant-zonecode": os.environ.get("X_NOONINSTANT_ZONECODE", "W00055702A"),
     "x-rocket-enabled": "true",
@@ -58,18 +58,17 @@ DEFAULT_KEYWORDS = (
     "خضار,فواكه,طماط,بطاطس,بصل,ليمون,موز,تفاح,"
     "منظف,صابون,شامبو,معجون اسنان,مناديل,حفاضات,"
     "منتجات عناية,مطهر,مبيض,غسول,مزيل عرق,"
-    "طعام قطط,طعام كلاب,مستلزمات اطفال,حليب اطفال,"
-    "شاحن,سماعة,باوربانك,بروتين,مكمل غذائي"
+    "طعام قطط,طعام كلاب,مستلزمات اطفال,حليب اطفال"
 )
 KEYWORDS = [
     k.strip() for k in os.environ.get("KEYWORDS", DEFAULT_KEYWORDS).split(",") if k.strip()
 ]
 
-# عتبات الفحص الرقمي الذكي
-MIN_OBSERVATIONS = 3          # عدد القراءات المطلوبة لبناء متوسط تاريخي موثوق
-PRICE_ERROR_DROP_PCT = 60.0   # نسبة الانهيار عن السعر التاريخي لاعتباره خطأ تسعير
-PEER_ERROR_DROP_PCT = 65.0    # نسبة الانخفاض عن "أقران نفس القسم" للمنتجات الجديدة (حل البداية الباردة)
-OFFICIAL_DISCOUNT_MIN_PCT = 70.0  # الحد الأدنى للخصومات الرسمية المعلنة من نون لتمريرها
+# عتبات الفحص الرقمي
+MIN_OBSERVATIONS = 3          
+PRICE_ERROR_DROP_PCT = 60.0   
+PEER_ERROR_DROP_PCT = 65.0    
+OFFICIAL_DISCOUNT_MIN_PCT = 70.0  
 
 MIN_CYCLE_SLEEP = int(os.environ.get("MIN_CYCLE_SLEEP", "600"))
 MAX_CYCLE_SLEEP = int(os.environ.get("MAX_CYCLE_SLEEP", "900"))
@@ -132,29 +131,36 @@ def search_keyword(session: requests.Session, keyword: str):
     try:
         resp = session.get(API_ENDPOINT, params={"q": keyword}, timeout=20)
         if resp.status_code == 200:
-            return extract_products(resp.json(), keyword)
-    except:
-        pass
+            items = extract_products(resp.json(), keyword)
+            log.info(f"✅ Found {len(items)} raw products for '{keyword}'")
+            return items
+        else:
+            log.error(f"⚠️ Noon API returned status code {resp.status_code} for '{keyword}'")
+    except Exception as e:
+        log.error(f"❌ Network/Connection error for '{keyword}': {e}")
     return []
 
 def extract_products(data: dict, keyword: str):
     items = []
     def handle(p):
-        sku = p.get("sku", "")
-        brand = p.get("brand", "")
-        title_text = p.get("title", "")
-        title = f"{brand} {title_text}".strip() if brand else title_text.strip()
-        if not title:
-            title = "منتج بدون اسم"
-            
-        if p.get("offerPrice"):
-            items.append({"id": sku, "title": title, "size": p.get("sizeInfo", ""), "current_price": float(p["offerPrice"]), "official_original": p.get("price"), "keyword": keyword})
-        for v in p.get("variantsBottomSheet", {}).get("variants", []) or []:
-            if v.get("price"):
-                v_sku = v.get("sku", sku)
-                qty_text = v.get("qtyText", "")
-                v_title = f"{title} ({qty_text})" if qty_text else title
-                items.append({"id": v_sku, "title": v_title.strip(), "size": v.get("title", ""), "current_price": float(v["price"]), "official_original": v.get("strikedPrice"), "keyword": keyword})
+        try:
+            sku = p.get("sku", "")
+            brand = p.get("brand", "")
+            title_text = p.get("title", "")
+            title = f"{brand} {title_text}".strip() if brand else title_text.strip()
+            if not title:
+                title = "منتج بدون اسم"
+                
+            if p.get("offerPrice"):
+                items.append({"id": sku, "title": title, "size": p.get("sizeInfo", ""), "current_price": float(p["offerPrice"]), "official_original": p.get("price"), "keyword": keyword})
+            for v in p.get("variantsBottomSheet", {}).get("variants", []) or []:
+                if v.get("price"):
+                    v_sku = v.get("sku", sku)
+                    qty_text = v.get("qtyText", "")
+                    v_title = f"{title} ({qty_text})" if qty_text else title
+                    items.append({"id": v_sku, "title": v_title.strip(), "size": v.get("title", ""), "current_price": float(v["price"]), "official_original": v.get("strikedPrice"), "keyword": keyword})
+        except Exception as e:
+            log.error(f"Error parsing specific product fields: {e}")
     
     def walk(n):
         if isinstance(n, dict):
@@ -165,7 +171,10 @@ def extract_products(data: dict, keyword: str):
         elif isinstance(n, list):
             for i in n: 
                 walk(i)
-    walk(data)
+    try:
+        walk(data)
+    except Exception as e:
+        log.error(f"Error walking response JSON structure: {e}")
     return items
 
 # ----------------------------- CORE LOGIC ----------------------------- #
@@ -181,7 +190,6 @@ def run_one_cycle(session: requests.Session, seen: dict, history: dict) -> int:
         if not items:
             continue
 
-        # فكرة كلاود الحصيفة: حساب متوسط السعر الحالي "لكل المنتجات المسترجعة في نفس الدورة لنفس القسم"
         all_prices_in_cycle = [item["current_price"] for item in items if item["current_price"] > 0]
         peer_median_price = statistics.median(all_prices_in_cycle) if len(all_prices_in_cycle) >= 3 else None
 
@@ -190,30 +198,22 @@ def run_one_cycle(session: requests.Session, seen: dict, history: dict) -> int:
             current = item["current_price"]
             pts = history.get(sku, [])
             
-            # 1. حساب المتوسط التاريخي الشخصي للمنتج إن وجد
             baseline = statistics.median([p for _, p in pts]) if len(pts) >= MIN_OBSERVATIONS else None
             drop_pct = ((baseline - current) / baseline * 100) if baseline else None
-            
-            # حساب الخصم الرسمي المعلن من نون
             official_drop = ((item["official_original"] - current) / item["official_original"] * 100) if (item.get("official_original") and item["official_original"] > current) else 0
 
             emoji, label, reason = None, None, ""
 
-            # المسار أ: المنتج له سجل تاريخي محفوظ وموثوق
             if drop_pct is not None:
                 if drop_pct >= PRICE_ERROR_DROP_PCT:
                     emoji, label, reason = "🔴", "خطأ تسعير مؤكد تاريخياً!", f"السعر انهار عن متوسطه المعتاد بنسبة {drop_pct:.0f}%"
                 elif official_drop >= OFFICIAL_DISCOUNT_MIN_PCT and drop_pct >= 20:
                     emoji, label, reason = "🟢", "خصم حقيقي ممتاز", f"أقل بنسبة {drop_pct:.0f}% عن سعره التاريخي"
                 elif official_drop >= OFFICIAL_DISCOUNT_MIN_PCT and drop_pct < 12:
-                    log.info(f"⏭️ Fake Deal Filtered (No real drop vs history): {item['title']}")
                     continue
             
-            # المسار ب (حل كلاود للبداية الباردة): منتج جديد كلياً يعتمد على مقارنة الأقران اللحظية
             elif peer_median_price and peer_median_price > 0:
-                # مقارنة سعر المنتج الحالي بمتوسط سعر القسم في نفس اللحظة
                 drop_vs_peers_pct = ((peer_median_price - current) / peer_median_price * 100)
-                
                 if drop_vs_peers_pct >= PEER_ERROR_DROP_PCT:
                     emoji, label, reason = "🚨", "خطأ تسعير لحظي (مقارنة بالقسم)!", f"سعر المنتج منخفض بنسبة {drop_vs_peers_pct:.0f}% عن متوسط أسعار باقي المنتجات الشبيهة المعروضة معه الآن ({peer_median_price:.1f} ر.س)"
                 elif official_drop >= OFFICIAL_DISCOUNT_MIN_PCT:
@@ -237,10 +237,9 @@ def run_one_cycle(session: requests.Session, seen: dict, history: dict) -> int:
                     seen[key] = now
                     alerts_sent += 1
 
-            # تحديث قاعدة بيانات الأسعار محلياً في الذاكرة
             if not pts or pts[-1][1] != current:
                 pts.append([now, current])
-                history[sku] = [pt for pt in pts if pt[0] >= (now - 30*86400)][-30:] # حفظ آخر 30 قراءة فقط
+                history[sku] = [pt for pt in pts if pt[0] >= (now - 30*86400)][-30:] 
                 has_history_changes = True
 
         time.sleep(random.uniform(MIN_REQUEST_DELAY, MAX_REQUEST_DELAY))
@@ -251,7 +250,7 @@ def run_one_cycle(session: requests.Session, seen: dict, history: dict) -> int:
     return alerts_sent
 
 def main():
-    log.info("🚀 Starting Noon Minutes Smart Baseline & Peer Watcher v6.0")
+    log.info("🚀 Starting Noon Minutes Smart Baseline & Peer Watcher v6.1")
     session = build_session()
     seen = load_json(SEEN_FILE)
     history = load_json(HISTORY_FILE)
