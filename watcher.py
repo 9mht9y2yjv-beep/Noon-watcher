@@ -1,26 +1,12 @@
 #!/usr/bin/env python3
 """
-Noon Minutes Discount Watcher — v3 (Direct API / Tuwaiq, Riyadh)
+Noon Minutes Discount Watcher — v4.0 (Smart Memory & Full Catalog Sweep)
 ------------------------------------------------------------------
 Calls the internal search endpoint directly:
     https://minutes.noon.com/_svc/catalog/search?q=<keyword>
 
-using the real headers captured from a live mobile session (location
-locked to Tuwaiq district, Riyadh). Scans a configurable keyword list
-(a practical stand-in for "the whole catalog", since there is no
-single "list everything" endpoint), classifies discounts by priority,
-and sends Telegram alerts. Runs forever with a respectful delay.
-
-Priority:
-  RED  (>= PRIORITY_1_THRESHOLD, default 80%): likely pricing error
-  YELLOW (>= PRIORITY_2_THRESHOLD, default 70%): high discount
-  anything else is ignored
-
-Honesty note: this uses plain HTTP requests with headers copied from
-a real browser session — it does NOT attempt to spoof TLS fingerprints
-or bypass any JS/CAPTCHA challenge. That means it can still get rate
-limited or blocked if run too aggressively; the delays below are
-intentionally conservative.
+UPDATED: Now tracks both item IDs and their last seen discount percentages.
+If a discount increases, it bypasses the 24-hour limit to alert you immediately.
 """
 
 import os
@@ -40,8 +26,6 @@ API_ENDPOINT = "https://minutes.noon.com/_svc/catalog/search"
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-# Real headers captured from the mobile session (Tuwaiq district).
-# Override any of these via environment variables if they expire/rotate.
 HEADERS = {
     "Accept": "application/json, text/plain, */*",
     "Cache-Control": "no-cache, max-age=0, must-revalidate, no-store",
@@ -66,35 +50,35 @@ HEADERS = {
     "x-services-zonecode": os.environ.get("X_SERVICES_ZONECODE", "SERVICES-SA-RIYADH"),
 }
 
-# Optional raw cookie string, if the endpoint ever requires session cookies too
 NOON_COOKIES = os.environ.get("NOON_COOKIES", "")
-
 LOCATION_LABEL = os.environ.get("LOCATION_LABEL", "حي طويق، الرياض")
 
-# Keyword list = our stand-in for "scan everything". Add/remove freely.
-DEFAULT_KEYWORDS = (
-    "حليب,لبن,زبادي,جبن,بيض,عصير,مياه,مشروبات غازية,قهوة,شاي,"
-    "أرز,مكرونة,زيت,سكر,ملح,طحين,خبز,معجنات,شوكولاتة,شيبس,"
-    "بسكويت,حلويات,مكسرات,دجاج,لحم,سمك,نقانق,برجر,"
-    "خضار,فواكه,طماط,بطاطس,بصل,ليمون,موز,تفاح,"
-    "منظف,صابون,شامبو,معجون اسنان,مناديل,حفاضات,"
-    "منتجات عناية,مطهر,مبيض,غسول,مزيل عرق,"
-    "طعام قطط,طعام كلاب,مستلزمات اطفال,حليب اطفال"
-)
-KEYWORDS = [
-    k.strip() for k in os.environ.get("KEYWORDS", DEFAULT_KEYWORDS).split(",") if k.strip()
+# موسوعة الكلمات المدمجة لضمان كشط كامل مخزون المتجر (المقاضي، البروتين، الإلكترونيات، النظافة)
+BUILTIN_BROAD_KEYWORDS = [
+    "حليب", "لبن", "زبادي", "جبن", "قشطة", "زبده", "بيض", "عصير", "ماء", "بيبسي", "كولا", "قهوة", "شاي",
+    "أرز", "مكرونة", "زيت", "سكر", "طحين", "خبز", "توست", "شوكولاتة", "شيبس", "بسكويت", "حلويات", "مكسرات",
+    "دجاج", "صدور", "لحم", "مفروم", "سمك", "تونة", "برجر", "ناجت", "روبيان", "مجمدات", "مثلجات", "ايس كريم",
+    "خضار", "فواكه", "طماطم", "بطاطس", "بصل", "ليمون", "موز", "تفاح", "برتقال", "صابون", "شامبو", "منظف", 
+    "تايد", "اريال", "برسيل", "منعم ملابس", "كمفورت", "داوني", "فانيش", "كلوركس", "صابون صحون", "فيري", 
+    "كبسولات غسيل", "ديتول", "مطهر", "جيل غسيل", "مناديل", "فاين", "اكياس نفايات", "حلاو", "علك", "لبان",
+    "بروتين", "واي بروتين", "بروتين بار", "سناك", "شاحن", "سماعة", "باوربانك", "سلك", "كابل", "ايفون", 
+    "ايباد", "انكر", "فطور", "كورن فليكس", "عسل", "مربى", "صلصة", "اندومي", "نودلز", "المراعي", "نادك", 
+    "الصافي", "ساديا", "دو", "رضوى", "امريكانا", "هرفي", "كبير", "نوتيلا", "عروض", "خصم", "تخفيضات"
 ]
+
+env_keywords = [k.strip() for k in os.environ.get("KEYWORDS", "").split(",") if k.strip()]
+KEYWORDS = list(dict.fromkeys(env_keywords + BUILTIN_BROAD_KEYWORDS))
 
 PRIORITY_1_THRESHOLD = float(os.environ.get("PRIORITY_1_THRESHOLD", "80"))
 PRIORITY_2_THRESHOLD = float(os.environ.get("PRIORITY_2_THRESHOLD", "70"))
 
-MIN_CYCLE_SLEEP = int(os.environ.get("MIN_CYCLE_SLEEP", "600"))   # 10 min
-MAX_CYCLE_SLEEP = int(os.environ.get("MAX_CYCLE_SLEEP", "900"))   # 15 min
-MIN_REQUEST_DELAY = float(os.environ.get("MIN_REQUEST_DELAY", "2.0"))
-MAX_REQUEST_DELAY = float(os.environ.get("MAX_REQUEST_DELAY", "5.0"))
+MIN_CYCLE_SLEEP = int(os.environ.get("MIN_CYCLE_SLEEP", "600"))
+MAX_CYCLE_SLEEP = int(os.environ.get("MAX_CYCLE_SLEEP", "900"))
+MIN_REQUEST_DELAY = float(os.environ.get("MIN_REQUEST_DELAY", "1.5"))
+MAX_REQUEST_DELAY = float(os.environ.get("MAX_REQUEST_DELAY", "3.5"))
 
 STATE_FILE = os.path.join(os.path.dirname(__file__), "seen.json")
-RESEND_AFTER_SECONDS = 60 * 60 * 24  # don't re-alert same item within 24h
+RESEND_AFTER_SECONDS = 60 * 60 * 24  # 24 ساعة تباعد للمنتجات الثابتة
 
 logging.basicConfig(
     level=logging.INFO,
@@ -103,8 +87,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("noon-watcher")
 
-# ----------------------------- STATE HELPERS ----------------------------- #
-
+# ----------------------------- HELPERS & CORE ----------------------------- #
 
 def load_seen() -> dict:
     if os.path.exists(STATE_FILE):
@@ -115,14 +98,12 @@ def load_seen() -> dict:
             return {}
     return {}
 
-
 def save_seen(seen: dict):
     try:
         with open(STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(seen, f, ensure_ascii=False, indent=2)
     except Exception as e:
         log.warning(f"Could not save state file: {e}")
-
 
 def send_telegram(text: str):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -146,7 +127,6 @@ def send_telegram(text: str):
     except Exception as e:
         log.warning(f"Telegram send error: {e}")
 
-
 def build_session() -> requests.Session:
     s = requests.Session()
     s.headers.update(HEADERS)
@@ -157,10 +137,6 @@ def build_session() -> requests.Session:
                 s.cookies.set(k, v)
     return s
 
-
-# ----------------------------- PRODUCT EXTRACTION ----------------------------- #
-
-
 def classify(discount: float):
     if discount >= PRIORITY_1_THRESHOLD:
         return "🔴", "Priority 1 — likely pricing error"
@@ -168,15 +144,7 @@ def classify(discount: float):
         return "🟡", "Priority 2 — high discount"
     return None, None
 
-
 def extract_deals_from_response(data: dict, keyword: str):
-    """
-    Recursively walks the JSON response and yields deal dicts whenever it
-    finds a genuine price-vs-original-price mismatch, either:
-      a) top-level product: 'price' vs 'offerPrice' mismatch (rare), or
-      b) bundle variants inside 'variantsBottomSheet.variants': these
-         already include 'price', 'strikedPrice' and 'discountPercent'.
-    """
     deals = []
 
     def handle_product(product: dict):
@@ -187,26 +155,22 @@ def extract_deals_from_response(data: dict, keyword: str):
         price = product.get("price")
         offer_price = product.get("offerPrice")
 
-        # Case A: direct price vs offerPrice mismatch on the base product
         if (
             isinstance(price, (int, float))
             and isinstance(offer_price, (int, float))
             and price > offer_price > 0
         ):
             discount = (price - offer_price) / price * 100
-            deals.append(
-                {
-                    "id": sku,
-                    "title": f"{brand} {title}".strip(),
-                    "size": size_info,
-                    "current_price": offer_price,
-                    "original_price": price,
-                    "discount": discount,
-                    "keyword": keyword,
-                }
-            )
+            deals.append({
+                "id": sku,
+                "title": f"{brand} {title}".strip(),
+                "size": size_info,
+                "current_price": offer_price,
+                "original_price": price,
+                "discount": discount,
+                "keyword": keyword,
+            })
 
-        # Case B: bundle variants with explicit strikedPrice / discountPercent
         vbs = product.get("variantsBottomSheet") or {}
         for variant in vbs.get("variants", []) or []:
             v_price = variant.get("price")
@@ -222,17 +186,15 @@ def extract_deals_from_response(data: dict, keyword: str):
                 discount = v_discount if isinstance(v_discount, (int, float)) else (
                     (v_striked - v_price) / v_striked * 100
                 )
-                deals.append(
-                    {
-                        "id": v_sku,
-                        "title": f"{brand} {title} ({variant.get('qtyText', '')})".strip(),
-                        "size": variant.get("title", size_info),
-                        "current_price": v_price,
-                        "original_price": v_striked,
-                        "discount": discount,
-                        "keyword": keyword,
-                    }
-                )
+                deals.append({
+                    "id": v_sku,
+                    "title": f"{brand} {title} ({variant.get('qtyText', '')})".strip(),
+                    "size": variant.get("title", size_info),
+                    "current_price": v_price,
+                    "original_price": v_striked,
+                    "discount": discount,
+                    "keyword": keyword,
+                })
 
     def walk(node):
         if isinstance(node, dict):
@@ -246,7 +208,6 @@ def extract_deals_from_response(data: dict, keyword: str):
 
     walk(data)
     return deals
-
 
 def search_keyword(session: requests.Session, keyword: str):
     params = {"q": keyword}
@@ -268,10 +229,6 @@ def search_keyword(session: requests.Session, keyword: str):
 
     return extract_deals_from_response(data, keyword)
 
-
-# ----------------------------- MESSAGE FORMATTING ----------------------------- #
-
-
 def format_message(emoji, label, deal):
     search_link = f"https://minutes.noon.com/saudi-en/search/?q={quote(deal['title'])}"
     msg = (
@@ -282,24 +239,20 @@ def format_message(emoji, label, deal):
         f"(بدل `{deal['original_price']:.2f}`)\n"
         f"📉 نسبة الخصم: *{deal['discount']:.0f}%*\n"
         f"📍 {LOCATION_LABEL}\n"
-        f"🔎 كلمة البحث: {deal['keyword']}\n"
+        f"🔎 كلمة فحص المتجر: {deal['keyword']}\n"
         f"🆔 SKU: `{deal['id']}`\n"
         f"🔗 [افتح البحث عن المنتج]({search_link})"
     )
     return msg
 
-
-# ----------------------------- MAIN CYCLE ----------------------------- #
-
-
 def run_one_cycle(session: requests.Session, seen: dict) -> int:
     now = time.time()
     alerts_sent = 0
 
-    log.info(f"Scanning {len(KEYWORDS)} keywords this cycle")
+    log.info(f"Scanning {len(KEYWORDS)} comprehensive catalog segments this cycle")
 
     for kw in KEYWORDS:
-        log.info(f"🔍 Searching: {kw}")
+        log.info(f"🔍 Sweeping: {kw}")
         try:
             deals = search_keyword(session, kw)
         except Exception as e:
@@ -312,12 +265,29 @@ def run_one_cycle(session: requests.Session, seen: dict) -> int:
                 continue
 
             did = deal["id"]
-            last_sent = seen.get(did)
-            if last_sent and (now - last_sent) < RESEND_AFTER_SECONDS:
-                continue
+            current_discount = deal["discount"]
+            state = seen.get(did)
+            
+            if state:
+                # التوافق مع الصيغ القديمة المخزنة مسبقاً في seen.json
+                if isinstance(state, (int, float)):
+                    last_sent = state
+                    last_discount = 0
+                else:
+                    last_sent = state.get("time", 0)
+                    last_discount = state.get("discount", 0)
+                
+                # تخطي الإرسال فقط إذا كان المنتج تم إرساله خلال 24 ساعة ولم يرتفع الخصم
+                if (now - last_sent) < RESEND_AFTER_SECONDS and current_discount <= last_discount:
+                    continue
+                
+                # إذا كان مٌرسل سابقاً لكن الخصم زاد، نعدل الملصق للتنبيه
+                if (now - last_sent) < RESEND_AFTER_SECONDS and current_discount > last_discount:
+                    label += " 📈 (الخصم زاد!)"
 
             send_telegram(format_message(emoji, label, deal))
-            seen[did] = now
+            # حفظ الوقت والخصم الحالي في الذاكرة الذكية
+            seen[did] = {"time": now, "discount": current_discount}
             alerts_sent += 1
 
         time.sleep(random.uniform(MIN_REQUEST_DELAY, MAX_REQUEST_DELAY))
@@ -325,15 +295,10 @@ def run_one_cycle(session: requests.Session, seen: dict) -> int:
     save_seen(seen)
     return alerts_sent
 
-
-# If true, run exactly one scan cycle and exit (used by GitHub Actions,
-# where scheduling/repeating is handled by the cron trigger itself).
-# If false, run forever with an internal sleep loop (used on a VPS/Termux).
 SINGLE_CYCLE = os.environ.get("SINGLE_CYCLE", "false").lower() == "true"
 
-
 def main():
-    log.info("🚀 Starting Noon Minutes watcher (Tuwaiq, Riyadh)")
+    log.info("🚀 Starting Noon Minutes Smart Catalog Watcher (Tuwaiq, Riyadh)")
     session = build_session()
     seen = load_seen()
 
@@ -343,26 +308,24 @@ def main():
     if SINGLE_CYCLE:
         try:
             sent = run_one_cycle(session, seen)
-            log.info(f"✅ Single cycle finished. Alerts sent: {sent}")
+            log.info(f"✅ Single sweep finished. Alerts sent: {sent}")
         except Exception as e:
-            log.error(f"❌ Unexpected error in cycle: {e}")
+            log.error(f"❌ Unexpected error in sweep: {e}")
         return
 
     while True:
         try:
             sent = run_one_cycle(session, seen)
-            log.info(f"✅ Cycle finished. Alerts sent: {sent}")
+            log.info(f"✅ Sweep finished. Alerts sent: {sent}")
         except Exception as e:
-            log.error(f"❌ Unexpected error in cycle: {e}")
+            log.error(f"❌ Unexpected error in sweep: {e}")
 
         sleep_for = random.uniform(MIN_CYCLE_SLEEP, MAX_CYCLE_SLEEP)
-        log.info(f"😴 Sleeping {sleep_for/60:.1f} minutes before next cycle...")
+        log.info(f"😴 Sleeping {sleep_for/60:.1f} minutes before next sweep...")
         time.sleep(sleep_for)
-
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
         log.info("🛑 Stopped manually.")
-        sys.exit(0)
