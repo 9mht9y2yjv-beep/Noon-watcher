@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """
-Noon Minutes Discount Watcher — v4.0 (Smart AI & Original Keywords)
+Noon Minutes Discount Watcher — v4.5 (Ultimate Smart AI Engine)
 ------------------------------------------------------------------
-Calls the internal search endpoint directly with live captured headers.
-Uses Gemini AI to filter fake deals and detect extreme pricing errors.
+Features:
+  - Live Mobile Captured Headers (Tuwaiq District, Riyadh)
+  - Smart Memory (Tracks pricing history & discount increases)
+  - Google Search Powered Gemini AI (Filters fake deals & catches 0% pricing errors)
+  - Robust Error Handling & API 400 Fixes
 """
 
 import os
@@ -50,7 +53,7 @@ HEADERS = {
 NOON_COOKIES = os.environ.get("NOON_COOKIES", "")
 LOCATION_LABEL = os.environ.get("LOCATION_LABEL", "حي طويق، الرياض")
 
-# قائمة كلماتك الأصلية تماماً بناءً على طلبك
+# قائمة كلماتك الأصلية تماماً بدون أي تعديل عليها بناءً على طلبك
 DEFAULT_KEYWORDS = (
     "حليب,لبن,زبادي,جبن,بيض,عصير,مياه,مشروبات غازية,قهوة,شاي,"
     "أرز,مكرونة,زيت,سكر,ملح,طحين,خبز,معجنات,شوكولاتة,شيبس,"
@@ -130,7 +133,7 @@ def build_session() -> requests.Session:
             if "=" in pair:
                 k, v = pair.strip().split("=", 1)
                 s.cookies.set(k, v)
-    return s
+        return s
 
 # ----------------------------- AI VERIFIER ENGINE ----------------------------- #
 
@@ -148,10 +151,10 @@ def verify_deal_with_ai(title, current_price):
     السعر المعروض في المتجر: {current_price} ريال سعودي.
     
     المهمة:
-    1. استخدم أداة البحث (Google Search) للبحث عن السعر الفعلي والحالي لهذا المنتج في السوق السعودي (أمازون السعودية، جرير، الصيدليات، أو السوبرماركت الكبرى).
+    1. استخدم أداة البحث (Google Search) للبحث عن السعر الفعلي والحالي لهذا搬نتج في السوق السعودي (أمازون السعودية، جرير، الصيدليات، أو السوبرماركت الكبرى).
     2. قارن السعر المعروض ({current_price} ريال) بمتوسط السعر في السوق.
     3. صنف العملية بدقة:
-       - إذا كان السعر المعروض أقل من السوق بفارق ضخم جداً (أكثر من 60% بدون سبب ترويجي منطكي) فهو خطأ تسعير (is_pricing_error: true).
+       - إذا كان السعر المعروض أقل من السوق بفارق ضخم جداً (أكثر من 60% بدون سبب ترويجي منطقي) فهو خطأ تسعير (is_pricing_error: true).
        - إذا كان السعر حقيقي وممتاز كعرض صنف (is_real_deal: true).
        - إذا كان السعر الأصلي مرفوع وهمياً وهو يباع بنفس السعر في كل مكان صنف (is_real_deal: false).
 
@@ -166,9 +169,9 @@ def verify_deal_with_ai(title, current_price):
     
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "tools": [{"google_search": {}}],
+        "tools": [{"google_search": {}}],  # تفعيل البحث الحي عبر جوجل أونلاين
         "generationConfig": {
-            "response_mime_type": "application/json"
+            # تم حذف ميم تايب الـ JSON هنا لتجنب تعارض الـ Google Search وحل خطأ 400
         }
     }
     
@@ -176,8 +179,20 @@ def verify_deal_with_ai(title, current_price):
         response = requests.post(url, headers=headers, json=payload, timeout=25)
         if response.status_code == 200:
             res_json = response.json()
-            text_response = res_json['candidates'][0]['content']['parts'][0]['text']
+            text_response = res_json['candidates'][0]['content']['parts'][0]['text'].strip()
+            
+            # تنظيف نصوص الماركداون إذا رجعها الموديل محاطة بـ ```json
+            if text_response.startswith("```"):
+                lines = text_response.splitlines()
+                if lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines[-1].startswith("```"):
+                    lines = lines[:-1]
+                text_response = "\n".join(lines).strip()
+                
             return json.loads(text_response)
+        else:
+            log.warning(f"Gemini API returned status {response.status_code}: {response.text}")
     except Exception as e:
         log.warning(f"AI Verification failed for {title}: {e}")
     
@@ -315,20 +330,29 @@ def run_one_cycle(session: requests.Session, seen: dict) -> int:
             current_price = deal["current_price"]
             title = deal["title"]
             
-            # الفلترة المشتبهة لكشف الأخطاء حتى لو الخصم 0%
+            # الفلترة الذكية المسبقة لاصطياد أخطاء الأسعار الفادحة (حتى لو الخصم 0%)
             is_suspiciously_cheap = current_price < 15.0 and any(keyword in title for keyword in ["شاحن", "سماعة", "بروتين", "باوربانك", "ايفون", "حفاضات"])
+            passes_normal_threshold = current_discount >= PRIORITY_2_THRESHOLD
             
-            if current_discount < PRIORITY_2_THRESHOLD and not is_suspiciously_cheap:
+            # تخطي السلعة فوراً إذا لم تصل لحد الخصم المطلوب وليست رخيصة بشكل مشبوه
+            if not passes_normal_threshold and not is_suspiciously_cheap:
                 continue
 
-            # استشارة الذكاء الاصطناعي أونلاين لقنص الفروقات الحقيقية
+            # استشارة الذكاء الاصطناعي لايف عبر جوجل لضرب العروض الوهمية وقنص الأخطاء الحقيقية
             log.info(f"🧠 Consulted Gemini AI to verify: {title} at {current_price} SAR")
             ai_result = verify_deal_with_ai(title, current_price)
             
+            # إذا جزم الـ AI أن العرض طبيعي أو مجرد رفع سعر وهمي، يتم إسقاط الصفقة فوراً
             if not ai_result.get("is_real_deal", True) and not ai_result.get("is_pricing_error", False):
                 log.info(f"❌ AI skipped fake/normal deal: {title}")
                 continue
+                
+            # حماية صارمة: لمنع وصول نسب مثل الـ 20% إلا لو أكد الـ AI قطعياً أنه خطأ تسعير سيستم فادح
+            if not passes_normal_threshold and not ai_result.get("is_pricing_error", False):
+                log.info(f"Skip: Low discount ({current_discount:.0f}%) and AI didn't flag as pricing error for {title}")
+                continue
 
+            # تحديد القالب والتسمية حسب تحليل الـ AI
             if ai_result.get("is_pricing_error", False):
                 emoji, label = "🚨", f"خطأ تسعير فادح! (سعر السوق: {ai_result.get('market_price')} ر.س)"
             else:
@@ -337,6 +361,7 @@ def run_one_cycle(session: requests.Session, seen: dict) -> int:
 
             deal["keyword"] += f" | 🤖 تحليل الـ AI: {ai_result.get('reason', '')}"
 
+            # فحص ذاكرة التاريخ والنسبة لضمان التنبيه في حال انهار السعر وزاد الخصم
             state = seen.get(did)
             if state:
                 if isinstance(state, (int, float)):
@@ -361,11 +386,10 @@ def run_one_cycle(session: requests.Session, seen: dict) -> int:
     save_seen(seen)
     return alerts_sent
 
-# أهم أسطر لتشغيل السكربت على السيرفر ومحاذاتها تماماً لليسار
 SINGLE_CYCLE = os.environ.get("SINGLE_CYCLE", "false").lower() == "true"
 
 def main():
-    log.info("🚀 Starting Noon Minutes watcher (Tuwaiq, Riyadh)")
+    log.info("🚀 Starting Noon Minutes Smart AI Watcher (Tuwaiq, Riyadh)")
     session = build_session()
     seen = load_seen()
 
