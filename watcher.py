@@ -1,23 +1,25 @@
 #!/usr/bin/env python3
 """
-Noon Minutes Discount Watcher — v5.0 (Digest & Clean UI)
---------------------------------------------------------
-- Gathers all discounts across sweeps.
-- Sends grouped, compact digests sorted by priority & discount.
-- Disables bulky link previews to keep Telegram clean.
+Noon Minutes Full Catalog Discount Watcher — v6.5 (Production Final)
+---------------------------------------------------------------------
+- 100% Crash-proof Telegram HTML formatting (True strikethrough & safe escaping).
+- Direct Noon Minutes SKU search links.
+- Smart deduplication with fallback IDs.
+- Automatic department sorting & minimum cash-saving threshold.
 """
 
 import os
 import sys
 import json
 import time
+import html
 import random
 import logging
 from urllib.parse import quote
 
 import requests
 
-# ----------------------------- CONFIG ----------------------------- #
+# ----------------------------- CONFIGURATION ----------------------------- #
 
 API_ENDPOINT = "https://minutes.noon.com/_svc/catalog/search"
 
@@ -28,8 +30,8 @@ HEADERS = {
     "Accept": "application/json, text/plain, */*",
     "Cache-Control": "no-cache, max-age=0, must-revalidate, no-store",
     "User-Agent": (
-        "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36"
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) "
+        "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"
     ),
     "x-platform": os.environ.get("X_PLATFORM", "mweb"),
     "x-cms": os.environ.get("X_CMS", "v2"),
@@ -51,31 +53,24 @@ HEADERS = {
 NOON_COOKIES = os.environ.get("NOON_COOKIES", "")
 LOCATION_LABEL = os.environ.get("LOCATION_LABEL", "حي طويق، الرياض")
 
-BUILTIN_BROAD_KEYWORDS = [
-    "حليب", "لبن", "زبادي", "جبن", "قشطة", "زبده", "بيض", "عصير", "ماء", "بيبسي", "كولا", "قهوة", "شاي",
-    "أرز", "مكرونة", "زيت", "سكر", "طحين", "خبز", "توست", "شوكولاتة", "شيبس", "بسكويت", "حلويات", "مكسرات",
-    "دجاج", "صدور", "لحم", "مفروم", "سمك", "تونة", "برجر", "ناجت", "روبيان", "مجمدات", "مثلجات", "ايس كريم",
-    "خضار", "فواكه", "طماطم", "بطاطس", "بصل", "ليمون", "موز", "تفاح", "برتقال", "صابون", "شامبو", "منظف", 
-    "تايد", "اريال", "برسيل", "منعم ملابس", "كمفورت", "داوني", "فانيش", "كلوركس", "صابون صحون", "فيري", 
-    "كبسولات غسيل", "ديتول", "مطهر", "جيل غسيل", "مناديل", "فاين", "اكياس نفايات", "حلاو", "علك", "لبان",
-    "بروتين", "واي بروتين", "بروتين بار", "سناك", "شاحن", "سماعة", "باوربانك", "سلك", "كابل", "ايفون", 
-    "ايباد", "انكر", "فطور", "كورن فليكس", "عسل", "مربى", "صلصة", "اندومي", "نودلز", "المراعي", "نادك", 
-    "الصافي", "ساديا", "دو", "رضوى", "امريكانا", "هرفي", "كبير", "نوتيلا", "عروض", "خصم", "تخفيضات"
+# التصنيفات الكبرى الشاملة لجميع منتجات المتجر
+CORE_CATEGORIES = [
+    "عروض", "تخفيضات", "سوبرماركت", "بروتين", "ألبان وبيض", "مخبوزات وحلويات",
+    "لحوم ودواجن", "مجمدات", "مشروبات وقهوة", "سناكات ومكسرات", "عناية شخصية",
+    "نظافة ومنزل", "إلكترونيات وشواحن", "صيدلية وصحة", "خضار وفواكه", "فطور ومربيات"
 ]
 
-env_keywords = [k.strip() for k in os.environ.get("KEYWORDS", "").split(",") if k.strip()]
-KEYWORDS = list(dict.fromkeys(env_keywords + BUILTIN_BROAD_KEYWORDS))
+# معايير التنبيه والوفر المالي
+PRIORITY_1_DISCOUNT = float(os.environ.get("PRIORITY_1_DISCOUNT", "80"))
+PRIORITY_1_MIN_SAVING = float(os.environ.get("PRIORITY_1_MIN_SAVING", "15"))  # وفر لا يقل عن 15 ريال
 
-PRIORITY_1_THRESHOLD = float(os.environ.get("PRIORITY_1_THRESHOLD", "80"))
-PRIORITY_2_THRESHOLD = float(os.environ.get("PRIORITY_2_THRESHOLD", "70"))
+PRIORITY_2_DISCOUNT = float(os.environ.get("PRIORITY_2_DISCOUNT", "65"))
+PRIORITY_2_MIN_SAVING = float(os.environ.get("PRIORITY_2_MIN_SAVING", "10"))  # وفر لا يقل عن 10 ريال
 
 MIN_CYCLE_SLEEP = int(os.environ.get("MIN_CYCLE_SLEEP", "600"))
 MAX_CYCLE_SLEEP = int(os.environ.get("MAX_CYCLE_SLEEP", "900"))
-MIN_REQUEST_DELAY = float(os.environ.get("MIN_REQUEST_DELAY", "1.2"))
-MAX_REQUEST_DELAY = float(os.environ.get("MAX_REQUEST_DELAY", "2.8"))
-
 STATE_FILE = os.path.join(os.path.dirname(__file__), "seen.json")
-RESEND_AFTER_SECONDS = 60 * 60 * 24  # 24 ساعة تباعد للمنتجات الثابتة
+RESEND_AFTER_SECONDS = 60 * 60 * 20  # 20 ساعة قبل إعادة إرسال نفس السلعة
 
 logging.basicConfig(
     level=logging.INFO,
@@ -84,13 +79,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("noon-watcher")
 
-# ----------------------------- HELPERS & CORE ----------------------------- #
-
-def clean_md(text: str) -> str:
-    """تنظيف النصوص لتجنب أخطاء تنسيق تيليجرام Markdown"""
-    for char in ["*", "_", "`", "[", "]"]:
-        text = text.replace(char, "")
-    return text.strip()
+# ----------------------------- CORE FUNCTIONS ----------------------------- #
 
 def load_seen() -> dict:
     if os.path.exists(STATE_FILE):
@@ -106,12 +95,12 @@ def save_seen(seen: dict):
         with open(STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(seen, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        log.warning(f"Could not save state file: {e}")
+        log.warning(f"Failed to save seen.json: {e}")
 
-def send_telegram(text: str):
+def send_telegram_html(message_html: str):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        log.warning("No Telegram token/chat_id set — printing alert instead:")
-        print(text)
+        log.warning("Telegram credentials missing, logging to stdout:")
+        print(message_html)
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     try:
@@ -119,16 +108,16 @@ def send_telegram(text: str):
             url,
             data={
                 "chat_id": TELEGRAM_CHAT_ID,
-                "text": text,
-                "parse_mode": "Markdown",
-                "disable_web_page_preview": True,  # إلغاء الصور الكبيرة المزعجة
+                "text": message_html,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
             },
             timeout=15,
         )
         if r.status_code != 200:
-            log.warning(f"Telegram send failed: {r.status_code} {r.text}")
+            log.warning(f"Telegram error {r.status_code}: {r.text}")
     except Exception as e:
-        log.warning(f"Telegram send error: {e}")
+        log.warning(f"Telegram network error: {e}")
 
 def build_session() -> requests.Session:
     s = requests.Session()
@@ -144,26 +133,32 @@ def extract_deals_from_response(data: dict, keyword: str):
     deals = []
 
     def handle_product(product: dict):
-        sku = product.get("sku", "")
-        title = product.get("title", "منتج بدون اسم")
-        brand = product.get("brand", "")
-        size_info = product.get("sizeInfo", "")
+        sku = str(product.get("sku") or "").strip()
+        title = str(product.get("title") or "منتج").strip()
+        brand = str(product.get("brand") or "").strip()
+        size_info = str(product.get("sizeInfo") or "").strip()
         price = product.get("price")
         offer_price = product.get("offerPrice")
+
+        full_title = f"{brand} {title}".strip()
+        unique_id = sku if sku else f"gen_{hash(full_title)}"
 
         if (
             isinstance(price, (int, float))
             and isinstance(offer_price, (int, float))
             and price > offer_price > 0
         ):
-            discount = (price - offer_price) / price * 100
+            discount = ((price - offer_price) / price) * 100
+            savings = price - offer_price
             deals.append({
-                "id": sku,
-                "title": f"{brand} {title}".strip(),
+                "id": unique_id,
+                "sku": sku,
+                "title": full_title,
                 "size": size_info,
-                "current_price": offer_price,
-                "original_price": price,
+                "current_price": float(offer_price),
+                "original_price": float(price),
                 "discount": discount,
+                "savings": savings,
                 "keyword": keyword,
             })
 
@@ -171,24 +166,29 @@ def extract_deals_from_response(data: dict, keyword: str):
         for variant in vbs.get("variants", []) or []:
             v_price = variant.get("price")
             v_striked = variant.get("strikedPrice")
+            v_sku = str(variant.get("sku") or sku).strip()
             v_discount = variant.get("discountPercent")
-            v_sku = variant.get("sku", sku)
+            v_qty = str(variant.get("qtyText") or "").strip()
+            v_title = f"{brand} {title} ({v_qty})".strip() if v_qty else full_title
+            v_unique_id = v_sku if v_sku else f"gen_{hash(v_title)}"
 
             if (
                 isinstance(v_price, (int, float))
                 and isinstance(v_striked, (int, float))
                 and v_striked > v_price > 0
             ):
-                discount = v_discount if isinstance(v_discount, (int, float)) else (
-                    (v_striked - v_price) / v_striked * 100
+                discount = float(v_discount) if isinstance(v_discount, (int, float)) else (
+                    ((v_striked - v_price) / v_striked) * 100
                 )
                 deals.append({
-                    "id": v_sku,
-                    "title": f"{brand} {title} ({variant.get('qtyText', '')})".strip(),
-                    "size": variant.get("title", size_info),
-                    "current_price": v_price,
-                    "original_price": v_striked,
+                    "id": v_unique_id,
+                    "sku": v_sku,
+                    "title": v_title,
+                    "size": str(variant.get("title") or size_info).strip(),
+                    "current_price": float(v_price),
+                    "original_price": float(v_striked),
                     "discount": discount,
+                    "savings": float(v_striked - v_price),
                     "keyword": keyword,
                 })
 
@@ -205,93 +205,101 @@ def extract_deals_from_response(data: dict, keyword: str):
     walk(data)
     return deals
 
-def search_keyword(session: requests.Session, keyword: str):
-    params = {"q": keyword}
+def search_department(session: requests.Session, category: str):
+    params = {
+        "q": category,
+        "sort[by]": "discount",
+        "sort[dir]": "desc",
+        "limit": 50,
+        "page": 1,
+    }
     try:
         resp = session.get(API_ENDPOINT, params=params, timeout=20)
+        if resp.status_code == 429:
+            log.warning("Rate limit reached. Pausing for 30s...")
+            time.sleep(30)
+            return []
+        if resp.status_code != 200:
+            return []
+        return extract_deals_from_response(resp.json(), category)
     except Exception as e:
-        log.warning(f"Connection error for '{keyword}': {e}")
+        log.warning(f"Network error sweeping '{category}': {e}")
         return []
 
-    if resp.status_code != 200:
-        return []
-
-    try:
-        data = resp.json()
-    except Exception:
-        return []
-
-    return extract_deals_from_response(data, keyword)
-
-def build_deal_line(deal: dict, is_increased: bool) -> str:
-    title_safe = clean_md(deal['title'])
-    size_str = f" ({clean_md(deal['size'])})" if deal['size'] else ""
-    search_link = f"https://minutes.noon.com/saudi-en/search/?q={quote(deal['title'])}"
+def build_deal_html(deal: dict, is_increased: bool) -> str:
+    title_escaped = html.escape(deal['title'])
+    size_escaped = f" ({html.escape(deal['size'])})" if deal['size'] else ""
     
-    tag = " 📈" if is_increased else ""
+    # رابط دقيق يفتح منتج المينتس مباشرة بالـ SKU أو بالاسم
+    search_query = deal['sku'] if deal['sku'] else deal['title']
+    noon_link = f"https://minutes.noon.com/saudi-ar/search/?q={quote(search_query)}"
+    
+    tag = " 📈 <b>(الخصم ارتفع)</b>" if is_increased else ""
+    
     return (
-        f"• [{title_safe}{size_str}]({search_link}){tag}\n"
-        f"   └ 💰 `{deal['current_price']:.2f} ر.س` ~{deal['original_price']:.2f}~ "
-        f"| خصم: *{deal['discount']:.0f}%*\n"
+        f"• <a href=\"{noon_link}\"><b>{title_escaped}{size_escaped}</b></a>{tag}\n"
+        f"   └ 💰 <code>{deal['current_price']:.2f} ر.س</code> <s>{deal['original_price']:.2f}</s> "
+        f"| وفر: <b>{deal['savings']:.1f} ر.س</b> (<b>{deal['discount']:.0f}%-</b>)\n"
     )
 
-def send_digest(p1_deals: list, p2_deals: list):
-    """إرسال العروض مجمعة في رسائل منظمة مع تقسيمها تلقائياً إذا طالت"""
+def dispatch_digest(p1: list, p2: list):
     sections = []
 
-    if p1_deals:
-        p1_deals.sort(key=lambda x: x[0]["discount"], reverse=True)
-        lines = [f"🚨 *أخطاء تسعيرية مؤكدة (Priority 1 ≥ {PRIORITY_1_THRESHOLD:.0f}%)*:\n"]
-        for d, inc in p1_deals:
-            lines.append(build_deal_line(d, inc))
-        sections.append("\n".join(lines))
+    if p1:
+        p1.sort(key=lambda x: (x[0]["discount"], x[0]["savings"]), reverse=True)
+        body = ["🚨 <b>أخطاء تسعيرية وصفقات استثنائية (Priority 1):</b>\n"]
+        for d, inc in p1:
+            body.append(build_deal_html(d, inc))
+        sections.append("\n".join(body))
 
-    if p2_deals:
-        p2_deals.sort(key=lambda x: x[0]["discount"], reverse=True)
-        lines = [f"⚡ *عروض قوية جداً (Priority 2 ≥ {PRIORITY_2_THRESHOLD:.0f}%)*:\n"]
-        for d, inc in p2_deals:
-            lines.append(build_deal_line(d, inc))
-        sections.append("\n".join(lines))
+    if p2:
+        p2.sort(key=lambda x: (x[0]["discount"], x[0]["savings"]), reverse=True)
+        body = ["⚡ <b>عروض وتخفيضات قوية (Priority 2):</b>\n"]
+        for d, inc in p2:
+            body.append(build_deal_html(d, inc))
+        sections.append("\n".join(body))
 
     if not sections:
         return
 
-    full_text = f"📍 *تحديث عروض نون مينتس — {LOCATION_LABEL}*\n" + "—" * 20 + "\n\n" + "\n\n".join(sections)
+    header = f"🛒 <b>رادار صفقات نون مينتس — {html.escape(LOCATION_LABEL)}</b>\n" + "—" * 25 + "\n\n"
+    full_message = header + "\n\n".join(sections)
 
-    # تقسيم الرسالة إذا تجاوزت 3800 حرف
-    if len(full_text) <= 3800:
-        send_telegram(full_text)
+    if len(full_message) <= 3800:
+        send_telegram_html(full_message)
     else:
-        chunks = []
-        current_chunk = ""
-        for line in full_text.split("\n"):
-            if len(current_chunk) + len(line) + 1 > 3800:
-                chunks.append(current_chunk)
-                current_chunk = line + "\n"
+        chunk = ""
+        for line in full_message.split("\n"):
+            if len(chunk) + len(line) + 1 > 3800:
+                send_telegram_html(chunk)
+                chunk = line + "\n"
+                time.sleep(1.5)
             else:
-                current_chunk += line + "\n"
-        if current_chunk:
-            chunks.append(current_chunk)
-
-        for chunk in chunks:
-            send_telegram(chunk)
-            time.sleep(1)
+                chunk += line + "\n"
+        if chunk:
+            send_telegram_html(chunk)
 
 def run_one_cycle(session: requests.Session, seen: dict) -> int:
     now = time.time()
-    p1_queue = []
-    p2_queue = []
+    p1_list = []
+    p2_list = []
     total_found = 0
 
-    log.info(f"Scanning {len(KEYWORDS)} catalog segments...")
+    log.info(f"Sweeping {len(CORE_CATEGORIES)} comprehensive catalog departments...")
 
-    for kw in KEYWORDS:
-        log.info(f"🔍 Sweeping: {kw}")
-        deals = search_keyword(session, kw)
+    for cat in CORE_CATEGORIES:
+        log.info(f"🔎 Scanning: {cat}")
+        deals = search_department(session, cat)
 
         for deal in deals:
-            discount = deal["discount"]
-            if discount < PRIORITY_2_THRESHOLD:
+            disc = deal["discount"]
+            save_val = deal["savings"]
+
+            # تصنيف الأولوية بناءً على نسبة الخصم والوفر المالي الحقيقي
+            is_p1 = (disc >= PRIORITY_1_DISCOUNT and save_val >= PRIORITY_1_MIN_SAVING) or (save_val >= 40)
+            is_p2 = (disc >= PRIORITY_2_DISCOUNT and save_val >= PRIORITY_2_MIN_SAVING) and not is_p1
+
+            if not (is_p1 or is_p2):
                 continue
 
             did = deal["id"]
@@ -299,31 +307,27 @@ def run_one_cycle(session: requests.Session, seen: dict) -> int:
             is_increased = False
 
             if state:
-                if isinstance(state, (int, float)):
-                    last_sent = state
-                    last_discount = 0
-                else:
-                    last_sent = state.get("time", 0)
-                    last_discount = state.get("discount", 0)
+                last_time = state if isinstance(state, (int, float)) else state.get("time", 0)
+                last_disc = 0 if isinstance(state, (int, float)) else state.get("discount", 0)
 
-                if (now - last_sent) < RESEND_AFTER_SECONDS and discount <= last_discount:
+                if (now - last_time) < RESEND_AFTER_SECONDS and disc <= last_disc:
                     continue
 
-                if (now - last_sent) < RESEND_AFTER_SECONDS and discount > last_discount:
+                if (now - last_time) < RESEND_AFTER_SECONDS and disc > last_disc:
                     is_increased = True
 
-            seen[did] = {"time": now, "discount": discount}
+            seen[did] = {"time": now, "discount": disc}
             total_found += 1
 
-            if discount >= PRIORITY_1_THRESHOLD:
-                p1_queue.append((deal, is_increased))
+            if is_p1:
+                p1_list.append((deal, is_increased))
             else:
-                p2_queue.append((deal, is_increased))
+                p2_list.append((deal, is_increased))
 
-        time.sleep(random.uniform(MIN_REQUEST_DELAY, MAX_REQUEST_DELAY))
+        time.sleep(random.uniform(1.2, 2.5))
 
-    if p1_queue or p2_queue:
-        send_digest(p1_queue, p2_queue)
+    if p1_list or p2_list:
+        dispatch_digest(p1_list, p2_list)
 
     save_seen(seen)
     return total_found
@@ -331,34 +335,28 @@ def run_one_cycle(session: requests.Session, seen: dict) -> int:
 SINGLE_CYCLE = os.environ.get("SINGLE_CYCLE", "false").lower() == "true"
 
 def main():
-    log.info("🚀 Starting Noon Minutes Digest Watcher")
+    log.info("🚀 Noon Minutes Robust Engine Active.")
     session = build_session()
     seen = load_seen()
 
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        log.warning("⚠️ Telegram token/chat_id not set — alerts will only be logged.")
-
     if SINGLE_CYCLE:
-        try:
-            sent = run_one_cycle(session, seen)
-            log.info(f"✅ Single sweep finished. Deals found: {sent}")
-        except Exception as e:
-            log.error(f"❌ Error in sweep: {e}")
+        sent = run_one_cycle(session, seen)
+        log.info(f"✅ Single sweep complete. Deals processed: {sent}")
         return
 
     while True:
         try:
             sent = run_one_cycle(session, seen)
-            log.info(f"✅ Sweep finished. Deals found: {sent}")
+            log.info(f"✅ Sweep complete. Deals processed: {sent}")
         except Exception as e:
-            log.error(f"❌ Error in sweep: {e}")
+            log.error(f"⚠️ Error in cycle: {e}")
 
-        sleep_for = random.uniform(MIN_CYCLE_SLEEP, MAX_CYCLE_SLEEP)
-        log.info(f"😴 Sleeping {sleep_for/60:.1f} minutes before next sweep...")
-        time.sleep(sleep_for)
+        sleep_seconds = random.uniform(MIN_CYCLE_SLEEP, MAX_CYCLE_SLEEP)
+        log.info(f"😴 Sleeping for {sleep_seconds/60:.1f} minutes...")
+        time.sleep(sleep_seconds)
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        log.info("🛑 Stopped manually.")
+        log.info("Terminated manually.")
