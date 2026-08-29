@@ -1,4 +1,5 @@
-usr/bin/env python3
+#!/usr/bin/env python3
+
 """
 Noon Minutes Discount Watcher — v4.0 (Smart Memory & Full Catalog Sweep)
 ------------------------------------------------------------------
