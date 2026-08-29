@@ -1,11 +1,12 @@
-#!/usr/bin/env python3
+usr/bin/env python3
 """
-Noon Minutes Full Catalog Discount Watcher — v6.0 (Enterprise Digest)
----------------------------------------------------------------------
-- Scans full departmental categories with auto-sorting by highest discount.
-- Filters out low-value micro discounts (requires meaningful SAR savings).
-- Consolidates all alerts into one structured Telegram digest.
-- Anti-ban jitter & exponential backoff included.
+Noon Minutes Discount Watcher — v4.0 (Smart Memory & Full Catalog Sweep)
+------------------------------------------------------------------
+Calls the internal search endpoint directly:
+    https://minutes.noon.com/_svc/catalog/search?q=<keyword>
+
+UPDATED: Now tracks both item IDs and their last seen discount percentages.
+If a discount increases, it bypasses the 24-hour limit to alert you immediately.
 """
 
 import os
@@ -18,7 +19,7 @@ from urllib.parse import quote
 
 import requests
 
-# ----------------------------- CONFIGURATION ----------------------------- #
+# ----------------------------- CONFIG ----------------------------- #
 
 API_ENDPOINT = "https://minutes.noon.com/_svc/catalog/search"
 
@@ -29,8 +30,8 @@ HEADERS = {
     "Accept": "application/json, text/plain, */*",
     "Cache-Control": "no-cache, max-age=0, must-revalidate, no-store",
     "User-Agent": (
-        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) "
-        "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"
+        "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36"
     ),
     "x-platform": os.environ.get("X_PLATFORM", "mweb"),
     "x-cms": os.environ.get("X_CMS", "v2"),
@@ -52,9 +53,9 @@ HEADERS = {
 NOON_COOKIES = os.environ.get("NOON_COOKIES", "")
 LOCATION_LABEL = os.environ.get("LOCATION_LABEL", "حي طويق، الرياض")
 
-# التصنيفات الشاملة التي تغطي المتجر بالكامل بدون حصر
-CORE_CATEGORIES = [
-  "حليب", "لبن", "زبادي", "جبن", "قشطة", "زبده", "بيض", "عصير", "ماء", "بيبسي", "كولا", "قهوة", "شاي",
+# موسوعة الكلمات المدمجة لضمان كشط كامل مخزون المتجر (المقاضي، البروتين، الإلكترونيات، النظافة)
+BUILTIN_BROAD_KEYWORDS = [
+    "حليب", "لبن", "زبادي", "جبن", "قشطة", "زبده", "بيض", "عصير", "ماء", "بيبسي", "كولا", "قهوة", "شاي",
     "أرز", "مكرونة", "زيت", "سكر", "طحين", "خبز", "توست", "شوكولاتة", "شيبس", "بسكويت", "حلويات", "مكسرات",
     "دجاج", "صدور", "لحم", "مفروم", "سمك", "تونة", "برجر", "ناجت", "روبيان", "مجمدات", "مثلجات", "ايس كريم",
     "خضار", "فواكه", "طماطم", "بطاطس", "بصل", "ليمون", "موز", "تفاح", "برتقال", "صابون", "شامبو", "منظف", 
@@ -65,17 +66,19 @@ CORE_CATEGORIES = [
     "الصافي", "ساديا", "دو", "رضوى", "امريكانا", "هرفي", "كبير", "نوتيلا", "عروض", "خصم", "تخفيضات"
 ]
 
-# معايير التنبيهات ونسب الخصم والوفر المالي
-PRIORITY_1_DISCOUNT = float(os.environ.get("PRIORITY_1_DISCOUNT", "80"))  # خصم 80% فأعلى
-PRIORITY_1_MIN_SAVING = float(os.environ.get("PRIORITY_1_MIN_SAVING", "15")) # وفر لا يقل عن 15 ريال
+env_keywords = [k.strip() for k in os.environ.get("KEYWORDS", "").split(",") if k.strip()]
+KEYWORDS = list(dict.fromkeys(env_keywords + BUILTIN_BROAD_KEYWORDS))
 
-PRIORITY_2_DISCOUNT = float(os.environ.get("PRIORITY_2_DISCOUNT", "65"))  # خصم 65% فأعلى
-PRIORITY_2_MIN_SAVING = float(os.environ.get("PRIORITY_2_MIN_SAVING", "10")) # وفر لا يقل عن 10 ريال
+PRIORITY_1_THRESHOLD = float(os.environ.get("PRIORITY_1_THRESHOLD", "80"))
+PRIORITY_2_THRESHOLD = float(os.environ.get("PRIORITY_2_THRESHOLD", "70"))
 
 MIN_CYCLE_SLEEP = int(os.environ.get("MIN_CYCLE_SLEEP", "600"))
 MAX_CYCLE_SLEEP = int(os.environ.get("MAX_CYCLE_SLEEP", "900"))
+MIN_REQUEST_DELAY = float(os.environ.get("MIN_REQUEST_DELAY", "1.5"))
+MAX_REQUEST_DELAY = float(os.environ.get("MAX_REQUEST_DELAY", "3.5"))
+
 STATE_FILE = os.path.join(os.path.dirname(__file__), "seen.json")
-RESEND_AFTER_SECONDS = 60 * 60 * 20  # 20 ساعة قبل إعادة إرسال نفس السلعة الثابتة
+RESEND_AFTER_SECONDS = 60 * 60 * 24  # 24 ساعة تباعد للمنتجات الثابتة
 
 logging.basicConfig(
     level=logging.INFO,
@@ -84,12 +87,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("noon-watcher")
 
-# ----------------------------- CORE FUNCTIONS ----------------------------- #
-
-def clean_md(text: str) -> str:
-    for ch in ["*", "_", "`", "[", "]"]:
-        text = text.replace(ch, "")
-    return text.strip()
+# ----------------------------- HELPERS & CORE ----------------------------- #
 
 def load_seen() -> dict:
     if os.path.exists(STATE_FILE):
@@ -105,27 +103,29 @@ def save_seen(seen: dict):
         with open(STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(seen, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        log.warning(f"Failed to save seen state: {e}")
+        log.warning(f"Could not save state file: {e}")
 
 def send_telegram(text: str):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        log.warning("Telegram credentials missing, printing alert to stdout:")
+        log.warning("No Telegram token/chat_id set — printing alert instead:")
         print(text)
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     try:
-        requests.post(
+        r = requests.post(
             url,
             data={
                 "chat_id": TELEGRAM_CHAT_ID,
                 "text": text,
                 "parse_mode": "Markdown",
-                "disable_web_page_preview": True,
+                "disable_web_page_preview": False,
             },
             timeout=15,
         )
+        if r.status_code != 200:
+            log.warning(f"Telegram send failed: {r.status_code} {r.text}")
     except Exception as e:
-        log.warning(f"Telegram network error: {e}")
+        log.warning(f"Telegram send error: {e}")
 
 def build_session() -> requests.Session:
     s = requests.Session()
@@ -137,12 +137,19 @@ def build_session() -> requests.Session:
                 s.cookies.set(k, v)
     return s
 
+def classify(discount: float):
+    if discount >= PRIORITY_1_THRESHOLD:
+        return "🔴", "Priority 1 — likely pricing error"
+    if discount >= PRIORITY_2_THRESHOLD:
+        return "🟡", "Priority 2 — high discount"
+    return None, None
+
 def extract_deals_from_response(data: dict, keyword: str):
     deals = []
 
     def handle_product(product: dict):
         sku = product.get("sku", "")
-        title = product.get("title", "منتج")
+        title = product.get("title", "منتج بدون اسم")
         brand = product.get("brand", "")
         size_info = product.get("sizeInfo", "")
         price = product.get("price")
@@ -153,8 +160,7 @@ def extract_deals_from_response(data: dict, keyword: str):
             and isinstance(offer_price, (int, float))
             and price > offer_price > 0
         ):
-            discount = ((price - offer_price) / price) * 100
-            savings = price - offer_price
+            discount = (price - offer_price) / price * 100
             deals.append({
                 "id": sku,
                 "title": f"{brand} {title}".strip(),
@@ -162,15 +168,14 @@ def extract_deals_from_response(data: dict, keyword: str):
                 "current_price": offer_price,
                 "original_price": price,
                 "discount": discount,
-                "savings": savings,
                 "keyword": keyword,
             })
 
-        # فحص الخيارات المتفرعة من المنتج إن وجدت
         vbs = product.get("variantsBottomSheet") or {}
         for variant in vbs.get("variants", []) or []:
             v_price = variant.get("price")
             v_striked = variant.get("strikedPrice")
+            v_discount = variant.get("discountPercent")
             v_sku = variant.get("sku", sku)
 
             if (
@@ -178,16 +183,16 @@ def extract_deals_from_response(data: dict, keyword: str):
                 and isinstance(v_striked, (int, float))
                 and v_striked > v_price > 0
             ):
-                v_discount = ((v_striked - v_price) / v_striked) * 100
-                v_savings = v_striked - v_price
+                discount = v_discount if isinstance(v_discount, (int, float)) else (
+                    (v_striked - v_price) / v_striked * 100
+                )
                 deals.append({
                     "id": v_sku,
                     "title": f"{brand} {title} ({variant.get('qtyText', '')})".strip(),
                     "size": variant.get("title", size_info),
                     "current_price": v_price,
                     "original_price": v_striked,
-                    "discount": v_discount,
-                    "savings": v_savings,
+                    "discount": discount,
                     "keyword": keyword,
                 })
 
@@ -204,158 +209,123 @@ def extract_deals_from_response(data: dict, keyword: str):
     walk(data)
     return deals
 
-def search_department(session: requests.Session, category: str):
-    # الفرز المباشر بنسبة التخفيض وجلب أكبر عدد ممكن
-    params = {
-        "q": category,
-        "sort[by]": "discount",
-        "sort[dir]": "desc",
-        "limit": 50,
-        "page": 1
-    }
+def search_keyword(session: requests.Session, keyword: str):
+    params = {"q": keyword}
     try:
         resp = session.get(API_ENDPOINT, params=params, timeout=20)
-        if resp.status_code == 429:
-            log.warning("Rate limit detected! Cooling down for 30s...")
-            time.sleep(30)
-            return []
-        if resp.status_code != 200:
-            return []
-        return extract_deals_from_response(resp.json(), category)
     except Exception as e:
-        log.warning(f"Error sweeping category '{category}': {e}")
+        log.warning(f"Connection error for '{keyword}': {e}")
         return []
 
-def format_deal_entry(deal: dict, is_increased: bool) -> str:
-    title_safe = clean_md(deal['title'])
-    size_str = f" ({clean_md(deal['size'])})" if deal['size'] else ""
-    # رابط مباشر للمنتج
-    noon_link = f"https://www.noon.com/saudi-ar/{deal['id']}/p/"
-    inc_tag = " 📈 (الخصم ارتفع)" if is_increased else ""
-    
-    return (
-        f"• [{title_safe}{size_str}]({noon_link}){inc_tag}\n"
-        f"   └ 💰 `{deal['current_price']:.2f} ر.س` ~{deal['original_price']:.2f}~ "
-        f"| وفر: *{deal['savings']:.1f} ر.س* (-{deal['discount']:.0f}%)\n"
+    if resp.status_code != 200:
+        log.warning(f"Unexpected status ({resp.status_code}) for '{keyword}': {resp.text[:200]}")
+        return []
+
+    try:
+        data = resp.json()
+    except Exception as e:
+        log.warning(f"Could not parse JSON for '{keyword}': {e}")
+        return []
+
+    return extract_deals_from_response(data, keyword)
+
+def format_message(emoji, label, deal):
+    search_link = f"https://minutes.noon.com/saudi-en/search/?q={quote(deal['title'])}"
+    msg = (
+        f"{emoji} *{label}*\n"
+        f"📦 *{deal['title']}*\n"
+        f"📏 {deal['size']}\n"
+        f"💰 السعر الحالي: `{deal['current_price']:.2f}` ر.س "
+        f"(بدل `{deal['original_price']:.2f}`)\n"
+        f"📉 نسبة الخصم: *{deal['discount']:.0f}%*\n"
+        f"📍 {LOCATION_LABEL}\n"
+        f"🔎 كلمة فحص المتجر: {deal['keyword']}\n"
+        f"🆔 SKU: `{deal['id']}`\n"
+        f"🔗 [افتح البحث عن المنتج]({search_link})"
     )
-
-def dispatch_digest(p1: list, p2: list):
-    sections = []
-
-    if p1:
-        p1.sort(key=lambda x: (x[0]["discount"], x[0]["savings"]), reverse=True)
-        body = [f"🚨 *أخطاء تسعيرية وصفقات استثنائية (Priority 1)*:"]
-        for d, inc in p1:
-            body.append(format_deal_entry(d, inc))
-        sections.append("\n".join(body))
-
-    if p2:
-        p2.sort(key=lambda x: (x[0]["discount"], x[0]["savings"]), reverse=True)
-        body = [f"⚡ *عروض وتخفيضات قوية (Priority 2)*:"]
-        for d, inc in p2:
-            body.append(format_deal_entry(d, inc))
-        sections.append("\n".join(body))
-
-    if not sections:
-        return
-
-    full_message = f"🛒 *رادار صفقات نون مينتس — {LOCATION_LABEL}*\n" + "—" * 20 + "\n\n" + "\n\n".join(sections)
-
-    # تجزئة الرسائل الطويلة لتفادي حدود تيليجرام
-    if len(full_message) <= 3800:
-        send_telegram(full_message)
-    else:
-        chunk = ""
-        for line in full_message.split("\n"):
-            if len(chunk) + len(line) + 1 > 3800:
-                send_telegram(chunk)
-                chunk = line + "\n"
-                time.sleep(1)
-            else:
-                chunk += line + "\n"
-        if chunk:
-            send_telegram(chunk)
+    return msg
 
 def run_one_cycle(session: requests.Session, seen: dict) -> int:
     now = time.time()
-    p1_list = []
-    p2_list = []
-    total_captured = 0
+    alerts_sent = 0
 
-    log.info(f"Initiating full sweep across {len(CORE_CATEGORIES)} departments...")
+    log.info(f"Scanning {len(KEYWORDS)} comprehensive catalog segments this cycle")
 
-    for cat in CORE_CATEGORIES:
-        log.info(f"🔎 Sweeping Department: {cat}")
-        deals = search_department(session, cat)
+    for kw in KEYWORDS:
+        log.info(f"🔍 Sweeping: {kw}")
+        try:
+            deals = search_keyword(session, kw)
+        except Exception as e:
+            log.warning(f"Unexpected error scanning '{kw}': {e}")
+            deals = []
 
         for deal in deals:
-            disc = deal["discount"]
-            save_val = deal["savings"]
-
-            # تحديد الأولوية مع شرط الوفر المالي الأدنى
-            is_p1 = (disc >= PRIORITY_1_DISCOUNT and save_val >= PRIORITY_1_MIN_SAVING) or (save_val >= 40)
-            is_p2 = (disc >= PRIORITY_2_DISCOUNT and save_val >= PRIORITY_2_MIN_SAVING) and not is_p1
-
-            if not (is_p1 or is_p2):
+            emoji, label = classify(deal["discount"])
+            if not emoji:
                 continue
 
             did = deal["id"]
+            current_discount = deal["discount"]
             state = seen.get(did)
-            is_increased = False
-
+            
             if state:
-                last_time = state if isinstance(state, (int, float)) else state.get("time", 0)
-                last_disc = 0 if isinstance(state, (int, float)) else state.get("discount", 0)
-
-                # تخطي إذا كان مرسلاً حديثاً ولم يزد الخصم
-                if (now - last_time) < RESEND_AFTER_SECONDS and disc <= last_disc:
+                # التوافق مع الصيغ القديمة المخزنة مسبقاً في seen.json
+                if isinstance(state, (int, float)):
+                    last_sent = state
+                    last_discount = 0
+                else:
+                    last_sent = state.get("time", 0)
+                    last_discount = state.get("discount", 0)
+                
+                # تخطي الإرسال فقط إذا كان المنتج تم إرساله خلال 24 ساعة ولم يرتفع الخصم
+                if (now - last_sent) < RESEND_AFTER_SECONDS and current_discount <= last_discount:
                     continue
+                
+                # إذا كان مٌرسل سابقاً لكن الخصم زاد، نعدل الملصق للتنبيه
+                if (now - last_sent) < RESEND_AFTER_SECONDS and current_discount > last_discount:
+                    label += " 📈 (الخصم زاد!)"
 
-                if (now - last_time) < RESEND_AFTER_SECONDS and disc > last_disc:
-                    is_increased = True
+            send_telegram(format_message(emoji, label, deal))
+            # حفظ الوقت والخصم الحالي في الذاكرة الذكية
+            seen[did] = {"time": now, "discount": current_discount}
+            alerts_sent += 1
 
-            seen[did] = {"time": now, "discount": disc}
-            total_captured += 1
-
-            if is_p1:
-                p1_list.append((deal, is_increased))
-            else:
-                p2_list.append((deal, is_increased))
-
-        # تأخير طبيعي ذكي بين الأقسام لتفادي الحظر
-        time.sleep(random.uniform(1.5, 3.0))
-
-    if p1_list or p2_list:
-        dispatch_digest(p1_list, p2_list)
+        time.sleep(random.uniform(MIN_REQUEST_DELAY, MAX_REQUEST_DELAY))
 
     save_seen(seen)
-    return total_captured
+    return alerts_sent
 
 SINGLE_CYCLE = os.environ.get("SINGLE_CYCLE", "false").lower() == "true"
 
 def main():
-    log.info("🚀 Noon Minutes Smart Engine Active.")
+    log.info("🚀 Starting Noon Minutes Smart Catalog Watcher (Tuwaiq, Riyadh)")
     session = build_session()
     seen = load_seen()
 
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        log.warning("⚠️ Telegram token/chat_id not set — alerts will only be logged.")
+
     if SINGLE_CYCLE:
-        sent = run_one_cycle(session, seen)
-        log.info(f"✅ Sweep complete. New alerts sent: {sent}")
+        try:
+            sent = run_one_cycle(session, seen)
+            log.info(f"✅ Single sweep finished. Alerts sent: {sent}")
+        except Exception as e:
+            log.error(f"❌ Unexpected error in sweep: {e}")
         return
 
     while True:
         try:
             sent = run_one_cycle(session, seen)
-            log.info(f"✅ Sweep finished. New alerts sent: {sent}")
+            log.info(f"✅ Sweep finished. Alerts sent: {sent}")
         except Exception as e:
-            log.error(f"⚠️ Error during execution: {e}")
+            log.error(f"❌ Unexpected error in sweep: {e}")
 
-        sleep_time = random.uniform(MIN_CYCLE_SLEEP, MAX_CYCLE_SLEEP)
-        log.info(f"😴 Sleeping for {sleep_time/60:.1f} minutes...")
-        time.sleep(sleep_time)
+        sleep_for = random.uniform(MIN_CYCLE_SLEEP, MAX_CYCLE_SLEEP)
+        log.info(f"😴 Sleeping {sleep_for/60:.1f} minutes before next sweep...")
+        time.sleep(sleep_for)
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        log.info("Process terminated.")
+        log.info("🛑 Stopped manually.")
